@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import curses
 import fcntl
 import json
@@ -32,6 +33,25 @@ from urllib.parse import urlparse
 APP_NAME = "ytaria-manager"
 DEFAULT_OUTPUT_DIR = Path.home() / "Downloads" / "ytaria-downloads"
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / APP_NAME / "jobs.sqlite3"
+DEFAULT_PID_PATH = Path.home() / ".local" / "state" / APP_NAME / "web.pid"
+
+# YouTube increasingly gates downloads behind "Sign in to confirm you're not a
+# bot". yt-dlp gets past that by presenting cookies from a logged-in session.
+# Point one of these at your browser (e.g. YTARIA_COOKIES_FROM_BROWSER=firefox)
+# or at an exported cookies.txt (YTARIA_COOKIES_FILE=/path/to/cookies.txt).
+COOKIES_FROM_BROWSER = os.environ.get("YTARIA_COOKIES_FROM_BROWSER", "").strip()
+COOKIES_FILE = os.environ.get("YTARIA_COOKIES_FILE", "").strip()
+# Browsers yt-dlp can extract cookies from; the web UI exposes these as a menu.
+SUPPORTED_COOKIE_BROWSERS = (
+    "brave",
+    "chrome",
+    "chromium",
+    "edge",
+    "firefox",
+    "opera",
+    "safari",
+    "vivaldi",
+)
 
 JOB_PENDING = "pending"
 JOB_RUNNING = "running"
@@ -78,6 +98,122 @@ def ensure_parent_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def read_pid(pid_path: Path) -> Optional[int]:
+    try:
+        raw = pid_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def pid_looks_like_ytaria(pid: int) -> bool:
+    proc_cmdline = Path("/proc") / str(pid) / "cmdline"
+    if not proc_cmdline.exists():
+        return True
+    try:
+        cmdline = proc_cmdline.read_text(encoding="utf-8").replace("\x00", " ")
+    except OSError:
+        return False
+    script_name = Path(__file__).name
+    return script_name in cmdline and "serve" in cmdline
+
+
+def find_service_pid_by_cmdline(host: str, port: int) -> Optional[int]:
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return None
+    script_name = Path(__file__).name
+    host_flag = f"--host {host}"
+    port_flag = f"--port {port}"
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_text(encoding="utf-8").replace("\x00", " ")
+        except OSError:
+            continue
+        if script_name not in cmdline or " serve " not in f" {cmdline} ":
+            continue
+        if host_flag in cmdline and port_flag in cmdline:
+            return int(entry.name)
+    return None
+
+
+def get_running_pid(pid_path: Path) -> Optional[int]:
+    pid = read_pid(pid_path)
+    if pid is None:
+        return None
+    if not is_pid_alive(pid):
+        remove_pidfile(pid_path)
+        return None
+    if not pid_looks_like_ytaria(pid):
+        return None
+    return pid
+
+
+def get_service_pid(pid_path: Path, host: str, port: int) -> tuple[Optional[int], bool]:
+    managed_pid = get_running_pid(pid_path)
+    if managed_pid is not None:
+        return managed_pid, True
+    discovered_pid = find_service_pid_by_cmdline(host, port)
+    if discovered_pid is not None and is_pid_alive(discovered_pid):
+        return discovered_pid, False
+    return None, False
+
+
+def write_pidfile(pid_path: Path) -> None:
+    ensure_parent_dir(pid_path)
+    pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+
+def remove_pidfile(pid_path: Path) -> None:
+    try:
+        pid_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def stop_pid(pid: int, timeout: float = 10.0) -> bool:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not is_pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if not is_pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    return not is_pid_alive(pid)
+
+
 def open_db(db_path: Path) -> sqlite3.Connection:
     ensure_parent_dir(db_path)
     conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
@@ -102,12 +238,17 @@ def init_db(conn: sqlite3.Connection) -> None:
             eta TEXT NOT NULL DEFAULT '',
             destination TEXT NOT NULL DEFAULT '',
             error TEXT NOT NULL DEFAULT '',
+            cookies_browser TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             started_at TEXT,
             finished_at TEXT
         )
         """
     )
+    # Migrate databases created before cookie support existed.
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "cookies_browser" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN cookies_browser TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
@@ -122,14 +263,16 @@ class JobStore:
         init_db(self.conn)
         self.lock = threading.Lock()
 
-    def add_job(self, url: str, output_dir: Path, command: str) -> int:
+    def add_job(
+        self, url: str, output_dir: Path, command: str, cookies_browser: str = ""
+    ) -> int:
         with self.lock:
             cur = self.conn.execute(
                 """
-                INSERT INTO jobs (url, output_dir, command, status, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO jobs (url, output_dir, command, cookies_browser, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (url, str(output_dir), command, JOB_PENDING, now_iso()),
+                (url, str(output_dir), command, cookies_browser, JOB_PENDING, now_iso()),
             )
             self.conn.commit()
             return int(cur.lastrowid)
@@ -222,11 +365,26 @@ class JobStore:
         return self.get_job(int(row["id"]))
 
 
-def build_yt_dlp_command(url: str, output_dir: Path) -> list[str]:
+def build_yt_dlp_command(
+    url: str, output_dir: Path, cookies_browser: str = ""
+) -> list[str]:
+    # A per-job browser choice (from the web UI) wins; otherwise fall back to
+    # the global env-var defaults so `YTARIA_COOKIES_*` still works headless.
+    cookie_args: list[str] = []
+    if cookies_browser:
+        cookie_args = ["--cookies-from-browser", cookies_browser]
+    elif COOKIES_FROM_BROWSER:
+        cookie_args = ["--cookies-from-browser", COOKIES_FROM_BROWSER]
+    elif COOKIES_FILE:
+        cookie_args = ["--cookies", COOKIES_FILE]
     return [
         "yt-dlp",
+        *cookie_args,
         "-f",
-        "bv*+ba",
+        # Best video+audio when separate streams exist, else the best single
+        # combined file. Without the "/b" fallback, videos that only offer
+        # progressive formats fail with "Requested format is not available".
+        "bv*+ba/b",
         "--downloader",
         "aria2c",
         # Keep transient network hiccups from killing a job outright.
@@ -330,7 +488,7 @@ class Worker:
         job_id = int(job["id"])
         output_dir = Path(job["output_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
-        cmd = build_yt_dlp_command(job["url"], output_dir)
+        cmd = build_yt_dlp_command(job["url"], output_dir, job.get("cookies_browser", ""))
         command_text = shlex.join(cmd)
         self.store.update_job(job_id, command=command_text)
 
@@ -546,7 +704,24 @@ class APIHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         job_id = int(match.group(1))
-        ok = self.server.app.store.retry_job(job_id)  # type: ignore[attr-defined]
+        store = self.server.app.store  # type: ignore[attr-defined]
+        # An optional body lets the UI change which browser's cookies to use
+        # before retrying (e.g. jobs queued before cookie support existed).
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length).decode("utf-8") if length else ""
+        payload = json.loads(raw) if raw else {}
+        if "cookies_browser" in payload:
+            cookies_browser = str(payload.get("cookies_browser", "")).strip().lower()
+            if cookies_browser and cookies_browser not in SUPPORTED_COOKIE_BROWSERS:
+                self.send_error(HTTPStatus.BAD_REQUEST, "unsupported cookies_browser")
+                return
+            job = store.get_job(job_id)
+            if job is not None:
+                command = shlex.join(
+                    build_yt_dlp_command(job["url"], Path(job["output_dir"]), cookies_browser)
+                )
+                store.update_job(job_id, cookies_browser=cookies_browser, command=command)
+        ok = store.retry_job(job_id)
         if not ok:
             self.send_error(HTTPStatus.CONFLICT, "job is not retryable")
             return
@@ -583,12 +758,18 @@ class APIHandler(BaseHTTPRequestHandler):
         payload = json.loads(raw or "{}")
         url = str(payload.get("url", "")).strip()
         output_dir = Path(payload.get("output_dir") or str(DEFAULT_OUTPUT_DIR))
+        cookies_browser = str(payload.get("cookies_browser", "")).strip().lower()
         if not url:
             self.send_error(HTTPStatus.BAD_REQUEST, "url is required")
             return
+        if cookies_browser and cookies_browser not in SUPPORTED_COOKIE_BROWSERS:
+            self.send_error(HTTPStatus.BAD_REQUEST, "unsupported cookies_browser")
+            return
         output_dir.mkdir(parents=True, exist_ok=True)
-        command = shlex.join(build_yt_dlp_command(url, output_dir))
-        job_id = self.server.app.store.add_job(url=url, output_dir=output_dir, command=command)  # type: ignore[attr-defined]
+        command = shlex.join(build_yt_dlp_command(url, output_dir, cookies_browser))
+        job_id = self.server.app.store.add_job(  # type: ignore[attr-defined]
+            url=url, output_dir=output_dir, command=command, cookies_browser=cookies_browser
+        )
         self._send_json({"ok": True, "id": job_id})
 
     def _send_json(self, payload: Any, status: int = 200) -> None:
@@ -701,6 +882,26 @@ HTML_PAGE = """<!doctype html>
               Add job
             </button>
           </div>
+          <div class="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <label for="cookiesBrowser" class="text-sm font-medium text-slate-300">Cookies from browser</label>
+            <select
+              id="cookiesBrowser"
+              class="rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-2.5 text-sm text-slate-100 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20"
+            >
+              <option value="">None (default)</option>
+              <option value="firefox">Firefox</option>
+              <option value="chrome">Chrome</option>
+              <option value="chromium">Chromium</option>
+              <option value="brave">Brave</option>
+              <option value="edge">Edge</option>
+              <option value="opera">Opera</option>
+              <option value="vivaldi">Vivaldi</option>
+              <option value="safari">Safari</option>
+            </select>
+          </div>
+          <p class="mt-2 text-xs leading-5 text-slate-500">
+            Pick your logged-in browser to get past YouTube's &ldquo;confirm you're not a bot&rdquo; check. Close Chromium-based browsers first, or they'll lock their cookie database.
+          </p>
           <div id="submitStatus" class="mt-3 text-sm text-slate-400">Ready.</div>
         </section>
 
@@ -758,6 +959,22 @@ HTML_PAGE = """<!doctype html>
     }}
     function primaryButtonClass() {{
       return baseButtonClass() + ' bg-sky-500 text-slate-950 hover:bg-sky-400';
+    }}
+    const COOKIE_BROWSERS = [
+      ['', 'No cookies'],
+      ['firefox', 'Firefox'],
+      ['chrome', 'Chrome'],
+      ['chromium', 'Chromium'],
+      ['brave', 'Brave'],
+      ['edge', 'Edge'],
+      ['opera', 'Opera'],
+      ['vivaldi', 'Vivaldi'],
+      ['safari', 'Safari'],
+    ];
+    function cookieOptions(selected) {{
+      return COOKIE_BROWSERS.map(([value, label]) =>
+        `<option value="${{value}}" ${{value === (selected || '') ? 'selected' : ''}}>${{label}}</option>`
+      ).join('');
     }}
     function statusBadgeClass(status) {{
       const base = 'inline-flex items-center rounded-full px-3 py-1 text-xs font-bold uppercase tracking-[0.18em]';
@@ -817,7 +1034,11 @@ HTML_PAGE = """<!doctype html>
         return cancel;
       }}
       if (job.status === 'failed' || job.status === 'canceled') {{
-        return `<button class="${{secondaryButtonClass()}}" onclick="retryJob(${{job.id}})">Retry</button>`;
+        return `
+          <select id="retryCookies-${{job.id}}" class="rounded-2xl border border-white/10 bg-slate-950/80 px-3 py-2.5 text-sm text-slate-100 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20">
+            ${{cookieOptions(job.cookies_browser)}}
+          </select>
+          <button class="${{secondaryButtonClass()}}" onclick="retryJob(${{job.id}})">Retry</button>`;
       }}
       return '<span class="text-sm text-slate-500">No actions</span>';
     }}
@@ -868,6 +1089,7 @@ HTML_PAGE = """<!doctype html>
     async function submitJob() {{
       const url = document.getElementById('url').value.trim();
       const output_dir = document.getElementById('outputDir').value.trim();
+      const cookies_browser = document.getElementById('cookiesBrowser').value;
       const status = document.getElementById('submitStatus');
       if (!url) {{
         status.textContent = 'URL is required.';
@@ -877,7 +1099,7 @@ HTML_PAGE = """<!doctype html>
       const res = await fetch('/api/jobs', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{url, output_dir}})
+        body: JSON.stringify({{url, output_dir, cookies_browser}})
       }});
       if (!res.ok) {{
         status.textContent = 'Failed to submit job.';
@@ -893,7 +1115,13 @@ HTML_PAGE = """<!doctype html>
       await refreshJobs();
     }}
     async function retryJob(id) {{
-      await fetch(`/api/jobs/${{id}}/retry`, {{method: 'POST'}});
+      const select = document.getElementById(`retryCookies-${{id}}`);
+      const body = select ? JSON.stringify({{cookies_browser: select.value}}) : undefined;
+      await fetch(`/api/jobs/${{id}}/retry`, {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body,
+      }});
       await refreshJobs();
     }}
     async function pauseJob(id) {{
@@ -936,8 +1164,19 @@ def daemonize() -> None:
 
 
 def serve(args: argparse.Namespace) -> None:
+    running_pid = get_running_pid(Path(args.pid_file))
+    if running_pid is not None and running_pid != os.getpid():
+        raise SystemExit(
+            f"ytaria-manager is already running with PID {running_pid} "
+            f"(pid file: {args.pid_file})"
+        )
+
     if args.background:
         daemonize()
+
+    pid_path = Path(args.pid_file)
+    write_pidfile(pid_path)
+    atexit.register(remove_pidfile, pid_path)
 
     app = App(Path(args.db))
     # Run the worker in-process (as a thread) so the web UI can pause/cancel
@@ -961,6 +1200,76 @@ def serve(args: argparse.Namespace) -> None:
     finally:
         server.server_close()
         app.stop_worker()
+        remove_pidfile(pid_path)
+
+
+def start_service(args: argparse.Namespace) -> None:
+    pid_path = Path(args.pid_file)
+    running_pid, managed = get_service_pid(pid_path, args.host, args.port)
+    if running_pid is not None:
+        mode = "managed" if managed else "unmanaged"
+        print(f"ytaria-manager is already running at http://{args.host}:{args.port}/ (PID {running_pid}, {mode}).")
+        return
+
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--db",
+        args.db,
+        "--pid-file",
+        args.pid_file,
+        "serve",
+        "--host",
+        args.host,
+        "--port",
+        str(args.port),
+    ]
+    with open(os.devnull, "rb") as devnull_r, open(os.devnull, "ab") as devnull_w:
+        subprocess.Popen(
+            cmd,
+            stdin=devnull_r,
+            stdout=devnull_w,
+            stderr=devnull_w,
+            start_new_session=True,
+            close_fds=True,
+        )
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        started_pid, _ = get_service_pid(pid_path, args.host, args.port)
+        if started_pid is not None:
+            print(f"Started ytaria-manager at http://{args.host}:{args.port}/ (PID {started_pid}).")
+            return
+        time.sleep(0.1)
+    raise SystemExit("ytaria-manager did not create its PID file; startup may have failed.")
+
+
+def stop_service(args: argparse.Namespace) -> None:
+    pid_path = Path(args.pid_file)
+    pid, managed = get_service_pid(pid_path, args.host, args.port)
+    if pid is None:
+        print("ytaria-manager is not running.")
+        remove_pidfile(pid_path)
+        return
+    if not stop_pid(pid):
+        raise SystemExit(f"Failed to stop ytaria-manager cleanly (PID {pid}).")
+    if managed:
+        remove_pidfile(pid_path)
+    print(f"Stopped ytaria-manager (PID {pid}).")
+
+
+def status_service(args: argparse.Namespace) -> None:
+    pid, managed = get_service_pid(Path(args.pid_file), args.host, args.port)
+    if pid is None:
+        print("ytaria-manager is stopped.")
+        return
+    mode = "managed" if managed else "unmanaged"
+    extra = f", pid file: {args.pid_file}" if managed else ""
+    print(f"ytaria-manager is running at http://{args.host}:{args.port}/ (PID {pid}, {mode}{extra}).")
+
+
+def restart_service(args: argparse.Namespace) -> None:
+    stop_service(args)
+    start_service(args)
 
 
 def acquire_worker_lock(db_path: Path) -> Optional[Any]:
@@ -1083,8 +1392,14 @@ def add_job(args: argparse.Namespace) -> None:
     store = JobStore(Path(args.db))
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    command = shlex.join(build_yt_dlp_command(args.url, output_dir))
-    job_id = store.add_job(args.url, output_dir, command)
+    cookies_browser = (args.cookies_from_browser or "").strip().lower()
+    if cookies_browser and cookies_browser not in SUPPORTED_COOKIE_BROWSERS:
+        raise SystemExit(
+            f"unsupported browser {cookies_browser!r}; choose from "
+            + ", ".join(SUPPORTED_COOKIE_BROWSERS)
+        )
+    command = shlex.join(build_yt_dlp_command(args.url, output_dir, cookies_browser))
+    job_id = store.add_job(args.url, output_dir, command, cookies_browser)
     print(job_id)
 
 
@@ -1101,8 +1416,29 @@ def list_jobs(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default=str(DEFAULT_DB_PATH), help="SQLite database path")
+    parser.add_argument("--pid-file", default=str(DEFAULT_PID_PATH), help="PID file for the web service")
 
     sub = parser.add_subparsers(dest="cmd", required=True)
+
+    start_p = sub.add_parser("start", help="Start the web UI in the background")
+    start_p.add_argument("--host", default="127.0.0.1")
+    start_p.add_argument("--port", type=int, default=8787)
+    start_p.set_defaults(func=start_service)
+
+    stop_p = sub.add_parser("stop", help="Stop the background web UI")
+    stop_p.add_argument("--host", default="127.0.0.1")
+    stop_p.add_argument("--port", type=int, default=8787)
+    stop_p.set_defaults(func=stop_service)
+
+    restart_p = sub.add_parser("restart", help="Restart the background web UI")
+    restart_p.add_argument("--host", default="127.0.0.1")
+    restart_p.add_argument("--port", type=int, default=8787)
+    restart_p.set_defaults(func=restart_service)
+
+    status_p = sub.add_parser("status", help="Show whether the web UI is running")
+    status_p.add_argument("--host", default="127.0.0.1")
+    status_p.add_argument("--port", type=int, default=8787)
+    status_p.set_defaults(func=status_service)
 
     serve_p = sub.add_parser("serve", help="Run the web UI and background worker")
     serve_p.add_argument("--host", default="127.0.0.1")
@@ -1119,6 +1455,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_p = sub.add_parser("add", help="Queue a job from the CLI")
     add_p.add_argument("url")
     add_p.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
+    add_p.add_argument(
+        "--cookies-from-browser",
+        default="",
+        metavar="BROWSER",
+        help="Extract cookies from this browser (e.g. firefox) to bypass bot checks",
+    )
     add_p.set_defaults(func=add_job)
 
     list_p = sub.add_parser("list", help="List jobs")

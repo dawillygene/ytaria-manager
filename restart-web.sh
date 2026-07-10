@@ -2,4 +2,4 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 "$DIR/ytaria.py" start --host 127.0.0.1 --port 8787 "$@"
+exec python3 "$DIR/ytaria.py" restart --host 127.0.0.1 --port 8787 "$@"
