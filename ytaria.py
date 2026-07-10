@@ -635,268 +635,142 @@ HTML_PAGE = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ytaria-manager</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {{
+      theme: {{
+        extend: {{
+          boxShadow: {{
+            glow: '0 24px 80px rgba(15, 23, 42, 0.45)',
+          }},
+        }},
+      }},
+    }};
+  </script>
   <style>
-    :root {
-      --bg: #0d1117;
-      --panel: #161b22;
-      --panel-2: #0f1720;
-      --text: #e6edf3;
-      --muted: #8b949e;
-      --accent: #2f81f7;
-      --good: #2ea043;
-      --warn: #d29922;
-      --bad: #f85149;
-      --line: #30363d;
-    }
-    * { box-sizing: border-box; }
-    body {
+    body {{
       margin: 0;
       min-height: 100vh;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background:
-        radial-gradient(circle at top left, rgba(47,129,247,0.18), transparent 30%),
-        radial-gradient(circle at bottom right, rgba(46,160,67,0.15), transparent 25%),
-        var(--bg);
-      color: var(--text);
-    }
-    .wrap { max-width: 1220px; margin: 0 auto; padding: 32px 20px 48px; }
-    .hero {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: space-between;
-      gap: 16px;
-      align-items: end;
-      margin-bottom: 20px;
-    }
-    h1 { margin: 0; font-size: 32px; letter-spacing: -0.03em; }
-    .sub { color: var(--muted); margin-top: 8px; max-width: 62ch; line-height: 1.5; }
-    .card {
-      background: rgba(22,27,34,0.86);
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      padding: 16px;
-      box-shadow: 0 18px 45px rgba(0,0,0,0.28);
-      backdrop-filter: blur(10px);
-    }
-    .grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr); gap: 16px; }
-    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
-    label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 8px; }
-    input {
-      width: 100%;
-      padding: 12px 14px;
-      border-radius: 12px;
-      border: 1px solid var(--line);
-      background: var(--panel-2);
-      color: var(--text);
-      outline: none;
-    }
-    input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47,129,247,0.18); }
-    .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; }
-    @media (max-width: 640px) { .row { grid-template-columns: 1fr; } }
-    button {
-      padding: 12px 16px;
-      border: 0;
-      border-radius: 12px;
-      background: linear-gradient(135deg, var(--accent), #6ea8fe);
-      color: white;
-      font-weight: 700;
-      cursor: pointer;
-    }
-    button.secondary { background: var(--panel-2); border: 1px solid var(--line); color: var(--text); }
-    .jobs-shell { padding: 0; overflow: hidden; }
-    .jobs-head, .job-row {
-      display: grid;
-      grid-template-columns: minmax(0, 2.3fr) minmax(180px, 1fr) minmax(260px, 1.5fr) 118px;
-      gap: 18px;
-      align-items: start;
-    }
-    .jobs-head {
-      padding: 16px 18px;
-      border-bottom: 1px solid var(--line);
-      color: var(--muted);
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-    }
-    .job-row {
-      padding: 18px;
-      border-bottom: 1px solid var(--line);
-    }
-    .job-row:last-child { border-bottom: 0; }
-    .job-cell { min-width: 0; }
-    .job-main {
-      display: grid;
-      grid-template-columns: 56px minmax(0, 1fr);
-      gap: 12px;
-      align-items: start;
-    }
-    .job-id {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-width: 34px;
-      height: 34px;
-      border-radius: 10px;
-      background: rgba(255,255,255,0.04);
-      font-weight: 700;
-    }
-    .job-title {
-      font-size: 15px;
-      line-height: 1.4;
-      word-break: break-word;
-    }
-    .job-url,
-    .job-output,
-    .job-destination {
-      margin-top: 6px;
-      font-size: 12px;
-      line-height: 1.45;
-      word-break: break-word;
-      overflow-wrap: anywhere;
-    }
-    .job-output { font-size: 13px; margin-top: 0; }
-    .job-status-block {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .job-actions {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      align-items: stretch;
-    }
-    .job-actions button { width: 100%; }
-    .progress-meta {
-      margin-top: 8px;
-      font-size: 12px;
-      line-height: 1.4;
-    }
-    .empty-state {
-      padding: 28px 18px;
-      color: var(--muted);
-      text-align: center;
-    }
-    @media (max-width: 1240px) {
-      .jobs-head { display: none; }
-      .job-row {
-        grid-template-columns: 1fr;
-        gap: 12px;
-      }
-      .job-main { grid-template-columns: 44px minmax(0, 1fr); }
-      .job-actions {
-        flex-direction: row;
-        flex-wrap: wrap;
-      }
-      .job-actions button {
-        width: auto;
-        min-width: 110px;
-      }
-    }
-    .pill {
-      display: inline-flex;
-      align-items: center;
-      padding: 6px 10px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 700;
-      background: rgba(255,255,255,0.06);
-    }
-    .pill.good { color: #9be9a8; }
-    .pill.warn { color: #f2cc60; }
-    .pill.bad { color: #ff7b72; }
-    .muted { color: var(--muted); }
-    .progress { width: 100%; height: 8px; border-radius: 999px; background: rgba(255,255,255,0.07); overflow: hidden; }
-    .progress > span { display: block; height: 100%; }
-    .bar-live { background: linear-gradient(90deg, #2f81f7, #2ea043); }
-    .bar-done { background: var(--good); }
-    .bar-failed { background: var(--bad); }
-    .bar-canceled { background: var(--muted); }
-    .bar-paused { background: var(--warn); opacity: 0.7; }
-    .errbox {
-      margin-top: 8px;
-      padding: 8px 10px;
-      border-radius: 8px;
-      border: 1px solid rgba(248,81,73,0.4);
-      background: rgba(248,81,73,0.08);
-      color: #ff9a92;
-      font-size: 12px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      white-space: pre-wrap;
-      word-break: break-word;
-      max-height: 140px;
-      overflow: auto;
-    }
-    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
-    .statusline { margin-top: 8px; color: var(--muted); font-size: 13px; }
-    .footer { margin-top: 18px; color: var(--muted); font-size: 13px; }
-    .credit {
-      margin-top: 10px;
-      padding-top: 14px;
-      border-top: 1px solid var(--line);
-      text-align: center;
-      color: var(--muted);
-      font-size: 13px;
-      letter-spacing: 0.02em;
-    }
-    .credit strong { color: var(--accent); }
-    code { color: #8fd3ff; }
+        radial-gradient(circle at top left, rgba(14, 165, 233, 0.18), transparent 30%),
+        radial-gradient(circle at bottom right, rgba(34, 197, 94, 0.14), transparent 28%),
+        #020617;
+    }}
   </style>
 </head>
-<body>
-  <div class="wrap">
-    <div class="hero">
-      <div>
-        <h1>ytaria-manager</h1>
-        <div class="sub">Queue YouTube jobs in the background. The worker runs <code>yt-dlp</code> with <code>aria2c</code>, merges audio and video, and keeps shared state in SQLite so the web UI and TUI see the same jobs.</div>
-      </div>
-      <div class="actions">
-        <button class="secondary" onclick="refreshJobs()">Refresh</button>
-      </div>
-    </div>
-
-    <div class="grid">
-      <div class="card">
-        <label for="url">Video URL</label>
-        <div class="row">
-          <input id="url" placeholder="https://youtu.be/..." autocomplete="off">
-          <button onclick="submitJob()">Add job</button>
+<body class="text-slate-100">
+  <div class="min-h-screen">
+    <div class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+      <div class="mb-8 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+        <div class="max-w-3xl">
+          <div class="mb-3 inline-flex items-center gap-2 rounded-full border border-sky-400/20 bg-sky-400/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.22em] text-sky-200">
+            Local download manager
+          </div>
+          <h1 class="text-4xl font-black tracking-tight text-white sm:text-5xl">ytaria-manager</h1>
+          <p class="mt-4 text-base leading-8 text-slate-300 sm:text-lg">
+            Queue YouTube jobs in the background. The worker runs <code class="rounded bg-slate-900/80 px-1.5 py-0.5 text-sky-300">yt-dlp</code>
+            with <code class="rounded bg-slate-900/80 px-1.5 py-0.5 text-sky-300">aria2c</code>, merges audio and video,
+            and keeps shared state in SQLite so the web UI and TUI stay in sync.
+          </p>
         </div>
-        <div class="statusline" id="submitStatus">Ready.</div>
-      </div>
-      <div class="card">
-        <label for="outputDir">Output directory</label>
-        <div class="row">
-          <input id="outputDir" value="__DEFAULT_OUTPUT_DIR__">
-          <button class="secondary" onclick="setDefaultOutput()">Use default</button>
+        <div class="flex shrink-0 items-center gap-3">
+          <button
+            class="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-semibold text-slate-100 transition hover:border-sky-300/40 hover:bg-sky-400/10"
+            onclick="refreshJobs()"
+          >
+            Refresh
+          </button>
         </div>
-        <div class="statusline">Default: <code>__DEFAULT_OUTPUT_DIR__</code></div>
+      </div>
+
+      <div class="grid gap-5 lg:grid-cols-[minmax(0,1.2fr)_minmax(340px,0.8fr)]">
+        <section class="rounded-3xl border border-white/10 bg-slate-900/75 p-5 shadow-glow backdrop-blur">
+          <label for="url" class="mb-3 block text-sm font-medium text-slate-300">Video URL</label>
+          <div class="flex flex-col gap-3 sm:flex-row">
+            <input
+              id="url"
+              placeholder="https://youtu.be/..."
+              autocomplete="off"
+              class="min-w-0 flex-1 rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20"
+            >
+            <button
+              class="inline-flex items-center justify-center rounded-2xl bg-sky-500 px-5 py-3 text-sm font-bold text-slate-950 transition hover:bg-sky-400"
+              onclick="submitJob()"
+            >
+              Add job
+            </button>
+          </div>
+          <div id="submitStatus" class="mt-3 text-sm text-slate-400">Ready.</div>
+        </section>
+
+        <section class="rounded-3xl border border-white/10 bg-slate-900/75 p-5 shadow-glow backdrop-blur">
+          <label for="outputDir" class="mb-3 block text-sm font-medium text-slate-300">Output directory</label>
+          <div class="flex flex-col gap-3 sm:flex-row">
+            <input
+              id="outputDir"
+              value="__DEFAULT_OUTPUT_DIR__"
+              class="min-w-0 flex-1 rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-slate-100 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20"
+            >
+            <button
+              class="inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-semibold text-slate-100 transition hover:border-emerald-300/40 hover:bg-emerald-400/10"
+              onclick="setDefaultOutput()"
+            >
+              Use default
+            </button>
+          </div>
+          <div class="mt-3 text-sm text-slate-400">
+            Default:
+            <code class="rounded bg-slate-950/80 px-1.5 py-0.5 text-sky-300">__DEFAULT_OUTPUT_DIR__</code>
+          </div>
+        </section>
+      </div>
+
+      <section class="mt-6 rounded-[28px] border border-white/10 bg-slate-900/75 p-4 shadow-glow backdrop-blur sm:p-6">
+        <div class="mb-5 flex flex-col gap-2 border-b border-white/10 pb-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h2 class="text-xl font-bold text-white">Jobs</h2>
+            <p class="mt-1 text-sm text-slate-400">Each download is shown as its own card with live progress, output path, and actions.</p>
+          </div>
+          <div class="text-xs uppercase tracking-[0.2em] text-slate-500">Auto refresh: 1.5s</div>
+        </div>
+        <div id="jobs" class="space-y-4"></div>
+      </section>
+
+      <div class="mt-6 flex flex-col gap-3 border-t border-white/10 pt-5 text-sm text-slate-400 sm:flex-row sm:items-center sm:justify-between">
+        <div>API: <code class="rounded bg-slate-950/80 px-1.5 py-0.5 text-sky-300">/api/jobs</code>. TUI: <code class="rounded bg-slate-950/80 px-1.5 py-0.5 text-sky-300">python3 ytaria.py tui</code></div>
+        <div>Developed and maintained by <span class="font-semibold text-sky-300">dawillygene</span></div>
       </div>
     </div>
-
-    <div class="card jobs-shell" style="margin-top:16px;">
-      <div class="jobs-head">
-        <div>Job</div>
-        <div>Status</div>
-        <div>Output</div>
-        <div>Actions</div>
-      </div>
-      <div id="jobs"></div>
-    </div>
-
-    <div class="footer">API: <code>/api/jobs</code>. TUI: run <code>python3 ytaria.py tui</code>.</div>
-    <div class="credit">Developed and maintained by <strong>dawillygene</strong></div>
   </div>
   <script>
     const defaultOutput = __DEFAULT_OUTPUT_JSON__;
+    function baseButtonClass() {{
+      return 'inline-flex items-center justify-center rounded-2xl px-4 py-2.5 text-sm font-semibold transition';
+    }}
+    function secondaryButtonClass() {{
+      return baseButtonClass() + ' border border-white/10 bg-white/5 text-slate-100 hover:border-sky-300/40 hover:bg-sky-400/10';
+    }}
+    function primaryButtonClass() {{
+      return baseButtonClass() + ' bg-sky-500 text-slate-950 hover:bg-sky-400';
+    }}
+    function statusBadgeClass(status) {{
+      const base = 'inline-flex items-center rounded-full px-3 py-1 text-xs font-bold uppercase tracking-[0.18em]';
+      if (status === 'done') return base + ' bg-emerald-400/15 text-emerald-300';
+      if (status === 'running') return base + ' bg-sky-400/15 text-sky-300';
+      if (status === 'pending') return base + ' bg-amber-400/15 text-amber-300';
+      if (status === 'paused') return base + ' bg-orange-400/15 text-orange-300';
+      return base + ' bg-rose-400/15 text-rose-300';
+    }}
+    function progressBarClass(status) {{
+      if (status === 'done') return 'bg-emerald-400';
+      if (status === 'running') return 'bg-gradient-to-r from-sky-400 to-emerald-400';
+      if (status === 'paused') return 'bg-amber-400';
+      if (status === 'failed') return 'bg-rose-400';
+      return 'bg-slate-500';
+    }}
     function setDefaultOutput() {{
       document.getElementById('outputDir').value = defaultOutput;
-    }}
-    function pillClass(status) {{
-      if (status === 'done') return 'pill good';
-      if (status === 'running' || status === 'pending' || status === 'paused') return 'pill warn';
-      if (status === 'failed' || status === 'canceled') return 'pill bad';
-      return 'pill';
     }}
     function esc(s) {{
       return String(s || '')
@@ -910,13 +784,6 @@ HTML_PAGE = """<!doctype html>
       const running = job.status === 'running';
       const pct = job.status === 'done' ? 100 : Number(job.progress || 0);
       const clamped = Math.max(0, Math.min(100, pct));
-      // Bar color tracks status so a dead job never looks live.
-      let barClass = 'bar-live';
-      if (job.status === 'done') barClass = 'bar-done';
-      else if (job.status === 'failed') barClass = 'bar-failed';
-      else if (job.status === 'canceled') barClass = 'bar-canceled';
-      else if (job.status === 'paused') barClass = 'bar-paused';
-      // Only a running job shows a live speed/ETA line.
       let detail = '';
       if (running) {{
         const parts = [];
@@ -927,25 +794,27 @@ HTML_PAGE = """<!doctype html>
         detail = 'paused';
       }}
       return `
-        <div class="progress"><span class="${{barClass}}" style="width:${{clamped}}%"></span></div>
-        <div class="muted progress-meta">${{pct.toFixed(1)}}%${{detail ? ' • ' + detail : ''}}</div>
+        <div class="h-2.5 overflow-hidden rounded-full bg-white/10">
+          <span class="block h-full rounded-full ${{progressBarClass(job.status)}}" style="width:${{clamped}}%"></span>
+        </div>
+        <div class="mt-2 text-sm text-slate-300">${{pct.toFixed(1)}}%${{detail ? ' • ' + detail : ''}}</div>
       `;
     }}
     function fmtActions(job) {{
-      const cancel = `<button class="secondary" onclick="cancelJob(${{job.id}})">Cancel</button>`;
+      const cancel = `<button class="${{secondaryButtonClass()}}" onclick="cancelJob(${{job.id}})">Cancel</button>`;
       if (job.status === 'running') {{
-        return `<button class="secondary" onclick="pauseJob(${{job.id}})">Pause</button> ` + cancel;
+        return `<button class="${{secondaryButtonClass()}}" onclick="pauseJob(${{job.id}})">Pause</button>${{cancel}}`;
       }}
       if (job.status === 'paused') {{
-        return `<button onclick="resumeJob(${{job.id}})">Continue</button> ` + cancel;
+        return `<button class="${{primaryButtonClass()}}" onclick="resumeJob(${{job.id}})">Continue</button>${{cancel}}`;
       }}
       if (job.status === 'pending') {{
         return cancel;
       }}
       if (job.status === 'failed' || job.status === 'canceled') {{
-        return `<button class="secondary" onclick="retryJob(${{job.id}})">Retry</button>`;
+        return `<button class="${{secondaryButtonClass()}}" onclick="retryJob(${{job.id}})">Retry</button>`;
       }}
-      return '<span class="muted">—</span>';
+      return '<span class="text-sm text-slate-500">No actions</span>';
     }}
     async function refreshJobs() {{
       const res = await fetch('/api/jobs');
@@ -954,33 +823,42 @@ HTML_PAGE = """<!doctype html>
       jobsEl.innerHTML = data.jobs.map(job => {{
         const hasTitle = job.title && job.title !== job.url;
         const err = job.status === 'failed' && job.error
-          ? `<div class="errbox">${{esc(job.error)}}</div>` : '';
+          ? `<div class="mt-4 max-h-40 overflow-auto rounded-2xl border border-rose-400/30 bg-rose-400/10 px-4 py-3 font-mono text-xs leading-6 text-rose-200">${{esc(job.error)}}</div>` : '';
         return `
-        <div class="job-row">
-          <div class="job-cell">
-            <div class="job-main">
-              <span class="job-id">${{job.id}}</span>
-              <div>
-                <div class="job-title">${{hasTitle ? esc(job.title) : esc(job.url)}}</div>
-                ${{hasTitle ? `<div class="muted job-url">${{esc(job.url)}}</div>` : ''}}
-                ${{err}}
+        <article class="rounded-[26px] border border-white/10 bg-slate-950/60 p-5 shadow-[0_10px_30px_rgba(0,0,0,0.22)]">
+          <div class="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+            <div class="min-w-0 flex-1">
+              <div class="flex items-start gap-4">
+                <span class="inline-flex h-11 min-w-11 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-3 text-sm font-bold text-slate-200">${{job.id}}</span>
+                <div class="min-w-0 flex-1">
+                  <h3 class="text-lg font-semibold leading-7 text-white break-words">${{hasTitle ? esc(job.title) : esc(job.url)}}</h3>
+                  ${{hasTitle ? `<div class="mt-2 break-all text-sm leading-6 text-slate-400">${{esc(job.url)}}</div>` : ''}}
+                </div>
               </div>
+              ${{err}}
             </div>
-          </div>
-          <div class="job-cell">
-            <div class="job-status-block">
-              <span class="${{pillClass(job.status)}}">${{esc(job.status)}}</span>
+            <div class="flex w-full flex-col gap-3 xl:max-w-xs">
+              <div class="${{statusBadgeClass(job.status)}}">${{esc(job.status)}}</div>
               <div>${{fmtProgress(job)}}</div>
             </div>
           </div>
-          <div class="job-cell">
-            <div class="job-output">${{esc(job.output_dir)}}</div>
-            <div class="muted job-destination">${{esc(job.destination || '')}}</div>
+
+          <div class="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1.5fr)_auto] lg:items-start">
+            <div class="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+              <div class="text-xs font-bold uppercase tracking-[0.2em] text-slate-500">Output</div>
+              <div class="mt-2 break-all text-sm leading-6 text-slate-200">${{esc(job.output_dir)}}</div>
+              <div class="mt-2 break-all text-xs leading-6 text-slate-500">${{esc(job.destination || '')}}</div>
+            </div>
+            <div class="flex flex-wrap gap-3 lg:justify-end">${{fmtActions(job)}}</div>
           </div>
-          <div class="job-cell job-actions">${{fmtActions(job)}}</div>
+        </article>
+      `;
+      }}).join('') || `
+        <div class="rounded-[26px] border border-dashed border-white/10 bg-slate-950/40 px-6 py-12 text-center">
+          <div class="text-lg font-semibold text-white">No jobs yet</div>
+          <div class="mt-2 text-sm text-slate-400">Paste a video URL above and queue your first download.</div>
         </div>
       `;
-      }}).join('') || '<div class="empty-state">No jobs yet.</div>';
     }}
     async function submitJob() {{
       const url = document.getElementById('url').value.trim();
