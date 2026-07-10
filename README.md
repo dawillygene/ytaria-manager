@@ -104,4 +104,6 @@ yt-dlp -f "bv*+ba" \
 
 ## Credit
 
-Developed and maintained by **dawillygene**.
+Developed and maintained by **Elia William Mariki (dawillygene)**, a systems software engineer based in Dodoma, Tanzania.
+
+Website: [dawillygene.com](https://www.dawillygene.com/)
