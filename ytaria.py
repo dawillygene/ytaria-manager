@@ -739,7 +739,12 @@ HTML_PAGE = """<!doctype html>
 
       <div class="mt-6 flex flex-col gap-3 border-t border-white/10 pt-5 text-sm text-slate-400 sm:flex-row sm:items-center sm:justify-between">
         <div>API: <code class="rounded bg-slate-950/80 px-1.5 py-0.5 text-sky-300">/api/jobs</code>. TUI: <code class="rounded bg-slate-950/80 px-1.5 py-0.5 text-sky-300">python3 ytaria.py tui</code></div>
-        <div>Developed and maintained by <span class="font-semibold text-sky-300">dawillygene</span></div>
+        <div>
+          Developed and maintained by
+          <a class="font-semibold text-sky-300 hover:text-sky-200" href="https://www.dawillygene.com/" target="_blank" rel="noreferrer">
+            Elia William Mariki (dawillygene)
+          </a>
+        </div>
       </div>
     </div>
   </div>
