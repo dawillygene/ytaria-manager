@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- PLACEHOLDER splash: replace with final artwork. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item><color android:color="#0F766E" /></item>
+    <item android:gravity="center" android:width="96dp" android:height="96dp"><vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="96dp" android:height="96dp" android:viewportWidth="64" android:viewportHeight="64"><path android:pathData="M32,14 L32,38 M32,38 L22,28 M32,38 L42,28 M16,48 L48,48" android:strokeColor="#FFFFFF" android:strokeWidth="5" android:strokeLineCap="round" android:strokeLineJoin="round" /></vector></item>
+</layer-list>
