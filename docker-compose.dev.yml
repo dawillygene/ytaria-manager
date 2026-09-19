@@ -1,0 +1,18 @@
+# Local / CI variant of the same stack: plain HTTP on http://localhost:8080, no certificates.
+# The egress boundary is still enforced exactly as in production.
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env up --build
+x-dev-env: &dev-env
+  YTARIA_ENV: development
+  YTARIA_COOKIE_SECURE: "false"
+  YTARIA_DOCS_ENABLED: "true"
+
+services:
+  migrate: { environment: *dev-env }
+  api: { environment: *dev-env }
+  worker: { environment: *dev-env }
+  scheduler: { environment: *dev-env }
+  web:
+    environment:
+      YTARIA_TLS: "off"
+    ports: !override ["8080:8080"]
+    volumes: !reset []
