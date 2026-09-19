@@ -1,0 +1,6 @@
+# Development / behind-another-TLS-terminator variant: plain HTTP only.
+server {
+  listen 8080;
+  server_name _;
+  include /etc/nginx/site.inc;
+}
