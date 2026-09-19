@@ -1,0 +1,15 @@
+# Direct runtime dependencies. requirements.txt is the pinned lockfile
+# generated from this file (see docs/DEVELOPMENT.md, "Updating dependencies").
+fastapi>=0.141,<0.142
+uvicorn[standard]>=0.53,<0.54
+sqlalchemy>=2.0.54,<2.1
+alembic>=1.20,<1.21
+psycopg[binary]>=3.3,<3.4
+celery>=5.6.3,<5.7
+redis>=8.1,<9
+pydantic>=2.13,<3
+pydantic-settings>=2.15,<3
+argon2-cffi>=25.1,<26
+pyjwt>=2.14,<3
+python-multipart>=0.0.32
+yt-dlp>=2026.8.19
