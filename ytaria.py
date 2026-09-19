@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Local yt-dlp + aria2 download manager with web and TUI frontends."""
+"""Legacy local (single-user) yt-dlp + aria2 download manager with web and TUI frontends.
+
+The multi-user server and Android app live in backend/ and frontend/; see docs/LEGACY.md."""
 
 from __future__ import annotations
 
@@ -35,23 +37,11 @@ DEFAULT_OUTPUT_DIR = Path.home() / "Downloads" / "ytaria-downloads"
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / APP_NAME / "jobs.sqlite3"
 DEFAULT_PID_PATH = Path.home() / ".local" / "state" / APP_NAME / "web.pid"
 
-# YouTube increasingly gates downloads behind "Sign in to confirm you're not a
-# bot". yt-dlp gets past that by presenting cookies from a logged-in session.
-# Point one of these at your browser (e.g. YTARIA_COOKIES_FROM_BROWSER=firefox)
-# or at an exported cookies.txt (YTARIA_COOKIES_FILE=/path/to/cookies.txt).
-COOKIES_FROM_BROWSER = os.environ.get("YTARIA_COOKIES_FROM_BROWSER", "").strip()
-COOKIES_FILE = os.environ.get("YTARIA_COOKIES_FILE", "").strip()
-# Browsers yt-dlp can extract cookies from; the web UI exposes these as a menu.
-SUPPORTED_COOKIE_BROWSERS = (
-    "brave",
-    "chrome",
-    "chromium",
-    "edge",
-    "firefox",
-    "opera",
-    "safari",
-    "vivaldi",
-)
+# LEGACY LOCAL MODE. The multi-user server lives in backend/ (see docs/LEGACY.md). This single-user
+# script intentionally has NO browser-cookie / cookies.txt support: a tool must not read another
+# browser profile or reuse one personal account for every download.
+MAX_URL_LENGTH = 2048
+MAX_BODY_BYTES = 64 * 1024
 
 JOB_PENDING = "pending"
 JOB_RUNNING = "running"
@@ -73,6 +63,19 @@ YTDLP_SPEED_RE = re.compile(r"at\s+([0-9.]+\s*[KMGT]?i?B/s)")
 YTDLP_ETA_RE = re.compile(r"ETA\s+([0-9:]+)")
 # Number of trailing output lines kept so a failed job explains itself.
 ERROR_TAIL_LINES = 20
+
+
+def validate_url(raw: str) -> str:
+    """Accept only plain http(s) URLs. Blocks option injection (leading "-") and other schemes."""
+    url = (raw or "").strip()
+    if not url or len(url) > MAX_URL_LENGTH or any(ch.isspace() or ord(ch) < 32 for ch in url):
+        raise ValueError("invalid URL")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("only http:// and https:// URLs are supported")
+    if parsed.username or parsed.password:
+        raise ValueError("URLs with embedded credentials are not accepted")
+    return url
 
 
 def now_iso() -> str:
@@ -245,7 +248,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    # Migrate databases created before cookie support existed.
+    # Column kept only so databases created by older versions keep working; it is never read or written.
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
     if "cookies_browser" not in columns:
         conn.execute("ALTER TABLE jobs ADD COLUMN cookies_browser TEXT NOT NULL DEFAULT ''")
@@ -253,7 +256,10 @@ def init_db(conn: sqlite3.Connection) -> None:
 
 
 def dict_from_row(row: sqlite3.Row) -> dict[str, Any]:
-    return dict(row)
+    data = dict(row)
+    data.pop("command", None)  # never expose the command line
+    data.pop("cookies_browser", None)
+    return data
 
 
 class JobStore:
@@ -263,16 +269,14 @@ class JobStore:
         init_db(self.conn)
         self.lock = threading.Lock()
 
-    def add_job(
-        self, url: str, output_dir: Path, command: str, cookies_browser: str = ""
-    ) -> int:
+    def add_job(self, url: str, output_dir: Path, command: str) -> int:
         with self.lock:
             cur = self.conn.execute(
                 """
-                INSERT INTO jobs (url, output_dir, command, cookies_browser, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO jobs (url, output_dir, command, status, created_at)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (url, str(output_dir), command, cookies_browser, JOB_PENDING, now_iso()),
+                (url, str(output_dir), command, JOB_PENDING, now_iso()),
             )
             self.conn.commit()
             return int(cur.lastrowid)
@@ -365,21 +369,10 @@ class JobStore:
         return self.get_job(int(row["id"]))
 
 
-def build_yt_dlp_command(
-    url: str, output_dir: Path, cookies_browser: str = ""
-) -> list[str]:
-    # A per-job browser choice (from the web UI) wins; otherwise fall back to
-    # the global env-var defaults so `YTARIA_COOKIES_*` still works headless.
-    cookie_args: list[str] = []
-    if cookies_browser:
-        cookie_args = ["--cookies-from-browser", cookies_browser]
-    elif COOKIES_FROM_BROWSER:
-        cookie_args = ["--cookies-from-browser", COOKIES_FROM_BROWSER]
-    elif COOKIES_FILE:
-        cookie_args = ["--cookies", COOKIES_FILE]
+def build_yt_dlp_command(url: str, output_dir: Path) -> list[str]:
     return [
         "yt-dlp",
-        *cookie_args,
+        "--ignore-config",  # do not inherit ~/.config/yt-dlp or system configuration
         "-f",
         # Best video+audio when separate streams exist, else the best single
         # combined file. Without the "/b" fallback, videos that only offer
@@ -387,13 +380,13 @@ def build_yt_dlp_command(
         "bv*+ba/b",
         "--downloader",
         "aria2c",
-        # Keep transient network hiccups from killing a job outright.
         "--downloader-args",
-        "aria2c:--max-tries=10 --retry-wait=3 --timeout=60 --connect-timeout=30",
+        "aria2c:--max-tries=5 --retry-wait=3 --timeout=60 --connect-timeout=30",
+        # Bounded retries (the original used "infinite", so a dead source never failed).
         "--retries",
-        "infinite",
+        "5",
         "--fragment-retries",
-        "infinite",
+        "5",
         "--merge-output-format",
         "mp4",
         "--newline",
@@ -401,6 +394,7 @@ def build_yt_dlp_command(
         "--restrict-filenames",
         "-P",
         str(output_dir),
+        "--",  # everything after this is the URL, never an option
         url,
     ]
 
@@ -488,7 +482,11 @@ class Worker:
         job_id = int(job["id"])
         output_dir = Path(job["output_dir"])
         output_dir.mkdir(parents=True, exist_ok=True)
-        cmd = build_yt_dlp_command(job["url"], output_dir, job.get("cookies_browser", ""))
+        try:
+            cmd = build_yt_dlp_command(validate_url(job["url"]), output_dir)
+        except ValueError as exc:  # e.g. a row queued by an older, unvalidated version
+            self.store.update_job(job_id, status=JOB_FAILED, finished_at=now_iso(), error=f"Rejected URL: {exc}")
+            return
         command_text = shlex.join(cmd)
         self.store.update_job(job_id, command=command_text)
 
@@ -705,22 +703,6 @@ class APIHandler(BaseHTTPRequestHandler):
             return
         job_id = int(match.group(1))
         store = self.server.app.store  # type: ignore[attr-defined]
-        # An optional body lets the UI change which browser's cookies to use
-        # before retrying (e.g. jobs queued before cookie support existed).
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length).decode("utf-8") if length else ""
-        payload = json.loads(raw) if raw else {}
-        if "cookies_browser" in payload:
-            cookies_browser = str(payload.get("cookies_browser", "")).strip().lower()
-            if cookies_browser and cookies_browser not in SUPPORTED_COOKIE_BROWSERS:
-                self.send_error(HTTPStatus.BAD_REQUEST, "unsupported cookies_browser")
-                return
-            job = store.get_job(job_id)
-            if job is not None:
-                command = shlex.join(
-                    build_yt_dlp_command(job["url"], Path(job["output_dir"]), cookies_browser)
-                )
-                store.update_job(job_id, cookies_browser=cookies_browser, command=command)
         ok = store.retry_job(job_id)
         if not ok:
             self.send_error(HTTPStatus.CONFLICT, "job is not retryable")
@@ -752,24 +734,25 @@ class APIHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"ok": True})
 
-    def _create_job(self) -> None:
-        length = int(self.headers.get("Content-Length", "0"))
+    def _read_json(self) -> Any:
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        if length > MAX_BODY_BYTES:
+            raise ValueError("request body too large")
         raw = self.rfile.read(length).decode("utf-8") if length else ""
-        payload = json.loads(raw or "{}")
-        url = str(payload.get("url", "")).strip()
-        output_dir = Path(payload.get("output_dir") or str(DEFAULT_OUTPUT_DIR))
-        cookies_browser = str(payload.get("cookies_browser", "")).strip().lower()
-        if not url:
-            self.send_error(HTTPStatus.BAD_REQUEST, "url is required")
+        return json.loads(raw or "{}")
+
+    def _create_job(self) -> None:
+        try:
+            payload = self._read_json()
+            url = validate_url(str(payload.get("url", "")))
+        except (ValueError, TypeError, AttributeError) as exc:
+            self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
             return
-        if cookies_browser and cookies_browser not in SUPPORTED_COOKIE_BROWSERS:
-            self.send_error(HTTPStatus.BAD_REQUEST, "unsupported cookies_browser")
-            return
+        # The output directory is never taken from the client (it used to be, which allowed writes anywhere).
+        output_dir = DEFAULT_OUTPUT_DIR
         output_dir.mkdir(parents=True, exist_ok=True)
-        command = shlex.join(build_yt_dlp_command(url, output_dir, cookies_browser))
-        job_id = self.server.app.store.add_job(  # type: ignore[attr-defined]
-            url=url, output_dir=output_dir, command=command, cookies_browser=cookies_browser
-        )
+        command = shlex.join(build_yt_dlp_command(url, output_dir))
+        job_id = self.server.app.store.add_job(url=url, output_dir=output_dir, command=command)  # type: ignore[attr-defined]
         self._send_json({"ok": True, "id": job_id})
 
     def _send_json(self, payload: Any, status: int = 200) -> None:
@@ -882,26 +865,6 @@ HTML_PAGE = """<!doctype html>
               Add job
             </button>
           </div>
-          <div class="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
-            <label for="cookiesBrowser" class="text-sm font-medium text-slate-300">Cookies from browser</label>
-            <select
-              id="cookiesBrowser"
-              class="rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-2.5 text-sm text-slate-100 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20"
-            >
-              <option value="">None (default)</option>
-              <option value="firefox">Firefox</option>
-              <option value="chrome">Chrome</option>
-              <option value="chromium">Chromium</option>
-              <option value="brave">Brave</option>
-              <option value="edge">Edge</option>
-              <option value="opera">Opera</option>
-              <option value="vivaldi">Vivaldi</option>
-              <option value="safari">Safari</option>
-            </select>
-          </div>
-          <p class="mt-2 text-xs leading-5 text-slate-500">
-            Pick your logged-in browser to get past YouTube's &ldquo;confirm you're not a bot&rdquo; check. Close Chromium-based browsers first, or they'll lock their cookie database.
-          </p>
           <div id="submitStatus" class="mt-3 text-sm text-slate-400">Ready.</div>
         </section>
 
@@ -910,6 +873,7 @@ HTML_PAGE = """<!doctype html>
           <div class="flex flex-col gap-3 sm:flex-row">
             <input
               id="outputDir"
+              readonly
               value="__DEFAULT_OUTPUT_DIR__"
               class="min-w-0 flex-1 rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-slate-100 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20"
             >
@@ -959,22 +923,6 @@ HTML_PAGE = """<!doctype html>
     }}
     function primaryButtonClass() {{
       return baseButtonClass() + ' bg-sky-500 text-slate-950 hover:bg-sky-400';
-    }}
-    const COOKIE_BROWSERS = [
-      ['', 'No cookies'],
-      ['firefox', 'Firefox'],
-      ['chrome', 'Chrome'],
-      ['chromium', 'Chromium'],
-      ['brave', 'Brave'],
-      ['edge', 'Edge'],
-      ['opera', 'Opera'],
-      ['vivaldi', 'Vivaldi'],
-      ['safari', 'Safari'],
-    ];
-    function cookieOptions(selected) {{
-      return COOKIE_BROWSERS.map(([value, label]) =>
-        `<option value="${{value}}" ${{value === (selected || '') ? 'selected' : ''}}>${{label}}</option>`
-      ).join('');
     }}
     function statusBadgeClass(status) {{
       const base = 'inline-flex items-center rounded-full px-3 py-1 text-xs font-bold uppercase tracking-[0.18em]';
@@ -1035,9 +983,6 @@ HTML_PAGE = """<!doctype html>
       }}
       if (job.status === 'failed' || job.status === 'canceled') {{
         return `
-          <select id="retryCookies-${{job.id}}" class="rounded-2xl border border-white/10 bg-slate-950/80 px-3 py-2.5 text-sm text-slate-100 outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20">
-            ${{cookieOptions(job.cookies_browser)}}
-          </select>
           <button class="${{secondaryButtonClass()}}" onclick="retryJob(${{job.id}})">Retry</button>`;
       }}
       return '<span class="text-sm text-slate-500">No actions</span>';
@@ -1088,8 +1033,6 @@ HTML_PAGE = """<!doctype html>
     }}
     async function submitJob() {{
       const url = document.getElementById('url').value.trim();
-      const output_dir = document.getElementById('outputDir').value.trim();
-      const cookies_browser = document.getElementById('cookiesBrowser').value;
       const status = document.getElementById('submitStatus');
       if (!url) {{
         status.textContent = 'URL is required.';
@@ -1099,7 +1042,7 @@ HTML_PAGE = """<!doctype html>
       const res = await fetch('/api/jobs', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify({{url, output_dir, cookies_browser}})
+        body: JSON.stringify({{url}})
       }});
       if (!res.ok) {{
         status.textContent = 'Failed to submit job.';
@@ -1115,13 +1058,7 @@ HTML_PAGE = """<!doctype html>
       await refreshJobs();
     }}
     async function retryJob(id) {{
-      const select = document.getElementById(`retryCookies-${{id}}`);
-      const body = select ? JSON.stringify({{cookies_browser: select.value}}) : undefined;
-      await fetch(`/api/jobs/${{id}}/retry`, {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body,
-      }});
+      await fetch(`/api/jobs/${{id}}/retry`, {{method: 'POST'}});
       await refreshJobs();
     }}
     async function pauseJob(id) {{
@@ -1352,9 +1289,13 @@ def tui(args: argparse.Namespace) -> None:
             if input_mode:
                 if ch in (10, 13):
                     if buffer.strip():
-                        command = shlex.join(build_yt_dlp_command(buffer.strip(), DEFAULT_OUTPUT_DIR))
-                        job_id = store.add_job(buffer.strip(), DEFAULT_OUTPUT_DIR, command)
-                        message = f"Queued job #{job_id}."
+                        try:
+                            url = validate_url(buffer.strip())
+                            command = shlex.join(build_yt_dlp_command(url, DEFAULT_OUTPUT_DIR))
+                            job_id = store.add_job(url, DEFAULT_OUTPUT_DIR, command)
+                            message = f"Queued job #{job_id}."
+                        except ValueError as exc:
+                            message = f"Rejected: {exc}"
                     buffer = ""
                     input_mode = False
                 elif ch in (27,):
@@ -1392,14 +1333,12 @@ def add_job(args: argparse.Namespace) -> None:
     store = JobStore(Path(args.db))
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    cookies_browser = (args.cookies_from_browser or "").strip().lower()
-    if cookies_browser and cookies_browser not in SUPPORTED_COOKIE_BROWSERS:
-        raise SystemExit(
-            f"unsupported browser {cookies_browser!r}; choose from "
-            + ", ".join(SUPPORTED_COOKIE_BROWSERS)
-        )
-    command = shlex.join(build_yt_dlp_command(args.url, output_dir, cookies_browser))
-    job_id = store.add_job(args.url, output_dir, command, cookies_browser)
+    try:
+        url = validate_url(args.url)
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}")
+    command = shlex.join(build_yt_dlp_command(url, output_dir))
+    job_id = store.add_job(url, output_dir, command)
     print(job_id)
 
 
@@ -1455,12 +1394,6 @@ def build_parser() -> argparse.ArgumentParser:
     add_p = sub.add_parser("add", help="Queue a job from the CLI")
     add_p.add_argument("url")
     add_p.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
-    add_p.add_argument(
-        "--cookies-from-browser",
-        default="",
-        metavar="BROWSER",
-        help="Extract cookies from this browser (e.g. firefox) to bypass bot checks",
-    )
     add_p.set_defaults(func=add_job)
 
     list_p = sub.add_parser("list", help="List jobs")
