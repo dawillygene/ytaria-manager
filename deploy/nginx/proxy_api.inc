@@ -1,6 +1,7 @@
 proxy_pass http://api:8000;
 proxy_http_version 1.1;
-proxy_set_header Host $host;
+# $http_host keeps the port (Origin checks compare against it); $host would drop it.
+proxy_set_header Host $http_host;
 # Overwrite (never append) so a client cannot spoof its address for rate limiting.
 proxy_set_header X-Forwarded-For $remote_addr;
 proxy_set_header X-Forwarded-Proto $scheme;
