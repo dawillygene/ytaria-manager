@@ -1,0 +1,22 @@
+# Production: HTTP only serves ACME challenges and redirects; everything else is HTTPS.
+server {
+  listen 8080;
+  server_name ${YTARIA_DOMAIN};
+  location /.well-known/acme-challenge/ { root /var/www/certbot; }
+  location / { return 301 https://$host$request_uri; }
+}
+server {
+  listen 8443 ssl;
+  http2 on;
+  server_name ${YTARIA_DOMAIN};
+
+  ssl_certificate     /etc/ytaria-certs/fullchain.pem;
+  ssl_certificate_key /etc/ytaria-certs/privkey.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_prefer_server_ciphers off;
+  ssl_session_cache shared:SSL:10m;
+  ssl_session_timeout 1d;
+  ssl_session_tickets off;
+
+  include /etc/nginx/site.inc;
+}
