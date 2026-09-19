@@ -1,0 +1,210 @@
+# ytaria-manager - single-VPS production stack.
+#
+# Networks (see docs/SECURITY.md):
+#   public    web only              - the one place ports are published (80/443)
+#   frontend  web <-> api           (internal: no route out)
+#   data_api    api, db, redis                      (internal)
+#   data_worker worker, scheduler, migrate, db, redis (internal) -> workers cannot reach the api or web
+#   workernet   worker <-> egress   (internal)  -> the worker has NO route to the internet
+#   egress    egress proxy only     - the only container with outbound internet access
+# Only `web` publishes ports. PostgreSQL and Redis are never reachable from outside Docker.
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
+x-python: &python
+  build: { context: ./backend }
+  image: ytaria-backend:latest
+  restart: unless-stopped
+  init: false            # the image already runs tini
+  logging: *logging
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  read_only: true
+  tmpfs: ["/tmp:size=64m,mode=1777"]
+
+x-app-env: &app-env
+  YTARIA_ENV: ${YTARIA_ENV:-production}
+  YTARIA_SECRET_KEY: ${YTARIA_SECRET_KEY:?set YTARIA_SECRET_KEY in .env}
+  YTARIA_DATABASE_URL: postgresql+psycopg://ytaria:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/ytaria
+  YTARIA_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
+  YTARIA_COOKIE_SECURE: ${YTARIA_COOKIE_SECURE:-true}
+  YTARIA_CORS_ORIGINS: ${YTARIA_CORS_ORIGINS:-}
+  YTARIA_REGISTRATION_MODE: ${YTARIA_REGISTRATION_MODE:-invite}
+  YTARIA_REGISTRATION_CODE: ${YTARIA_REGISTRATION_CODE:-}
+  YTARIA_DOCS_ENABLED: "false"
+  YTARIA_MAX_CONCURRENT_JOBS_GLOBAL: ${YTARIA_MAX_CONCURRENT_JOBS_GLOBAL:-2}
+  YTARIA_MAX_CONCURRENT_JOBS_PER_USER: ${YTARIA_MAX_CONCURRENT_JOBS_PER_USER:-1}
+  YTARIA_MAX_ACTIVE_JOBS_PER_USER: ${YTARIA_MAX_ACTIVE_JOBS_PER_USER:-5}
+  YTARIA_USER_QUOTA_BYTES: ${YTARIA_USER_QUOTA_BYTES:-10737418240}
+  YTARIA_MAX_FILE_BYTES: ${YTARIA_MAX_FILE_BYTES:-2147483648}
+  YTARIA_MIN_FREE_DISK_BYTES: ${YTARIA_MIN_FREE_DISK_BYTES:-2147483648}
+  YTARIA_COMPLETED_RETENTION_HOURS: ${YTARIA_COMPLETED_RETENTION_HOURS:-168}
+  YTARIA_ALLOWED_SOURCE_HOSTS: ${YTARIA_ALLOWED_SOURCE_HOSTS:-youtube.com,youtu.be,vimeo.com,dailymotion.com,archive.org}
+  YTARIA_HEARTBEAT_SECONDS: ${YTARIA_HEARTBEAT_SECONDS:-5}
+
+name: ytaria   # fixed project name: volume names are referenced by deploy/certbot.sh
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      POSTGRES_USER: ytaria
+      POSTGRES_DB: ytaria
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    networks: [data_api, data_worker]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ytaria -d ytaria"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    stop_grace_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    logging: *logging
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    volumes: [redisdata:/data]
+    networks: [data_api, data_worker]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    <<: *python
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment: *app-env
+    networks: [data_worker]
+    depends_on: { db: { condition: service_healthy } }
+
+  api:
+    <<: *python
+    environment:
+      <<: *app-env
+      FORWARDED_ALLOW_IPS: "*"   # only Nginx can reach this port (frontend network is internal)
+    volumes: [media:/data/media:ro]
+    networks: [frontend, data_api]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck", "http", "http://127.0.0.1:8000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    mem_limit: ${API_MEM_LIMIT:-512m}
+    pids_limit: 256
+    stop_grace_period: 30s
+
+  worker:
+    <<: *python
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "-Q", "downloads,inspect", "--concurrency", "4", "--loglevel", "INFO", "--without-gossip", "--without-mingle"]
+    environment:
+      <<: *app-env
+      YTARIA_EGRESS_PROXY_URL: http://egress:3128
+    volumes: [media:/data/media, scratch:/data/scratch]
+    networks: [data_worker, workernet]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      egress: { condition: service_started }
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app inspect ping -d celery@$$HOSTNAME -t 10 >/dev/null 2>&1"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
+    mem_limit: ${WORKER_MEM_LIMIT:-2g}
+    cpus: ${WORKER_CPUS:-2}
+    pids_limit: 512
+    # Warm shutdown: Celery stops taking work; running downloads get this long. Anything still running is
+    # recovered through lease expiry and resumes from its partial data.
+    stop_grace_period: 60s
+
+  # Exactly one scheduler: celery beat (embedded) + the maintenance worker. Do not scale this service.
+  scheduler:
+    <<: *python
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "-B", "-Q", "maintenance", "--concurrency", "1", "--loglevel", "INFO", "--schedule", "/tmp/celerybeat-schedule", "--without-gossip", "--without-mingle"]
+    environment: *app-env
+    volumes: [media:/data/media]
+    networks: [data_worker]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app inspect ping -d celery@$$HOSTNAME -t 10 >/dev/null 2>&1"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
+    mem_limit: 256m
+    stop_grace_period: 30s
+
+  # SSRF boundary: resolves DNS itself, refuses non-public addresses, pins the connection to the validated IP.
+  egress:
+    <<: *python
+    command: ["python", "-m", "app.egress_proxy"]
+    environment:
+      YTARIA_ENV: development   # the proxy needs no secrets; do not hand it any
+      YTARIA_PROXY_BIND: 0.0.0.0:3128
+      YTARIA_ALLOWED_PORTS: "80,443"
+    networks: [workernet, egress]
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck", "tcp", "127.0.0.1", "3128"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    mem_limit: 256m
+    pids_limit: 256
+
+  web:
+    build: { context: ., dockerfile: deploy/web.Dockerfile }
+    image: ytaria-web:latest
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      YTARIA_TLS: "on"
+      YTARIA_DOMAIN: ${YTARIA_DOMAIN:-localhost}
+    ports: ["80:8080", "443:8443"]
+    volumes:
+      - ./data/certs:/etc/ytaria-certs:ro
+      - certbot-www:/var/www/certbot:ro
+    networks: [public, frontend]
+    depends_on: { api: { condition: service_healthy } }
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    # The container's /etc/nginx is generated at start-up by the entrypoint, so the root fs stays writable
+    # (the process is non-root, has no capabilities and no new privileges).
+    tmpfs: ["/tmp:size=64m"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    mem_limit: 128m
+
+volumes:
+  pgdata:
+  redisdata:
+  media:
+  scratch:
+  certbot-www:
+
+networks:
+  public: {}
+  frontend: { internal: true }
+  data_api: { internal: true }
+  data_worker: { internal: true }
+  workernet: { internal: true }
+  egress: {}
