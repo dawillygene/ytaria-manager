@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+/* Design tokens. Light by default, dark via OS preference or an explicit choice (data-theme). */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #eef1f5;
+  --fg: #0f172a;
+  --muted: #475569;
+  --border: #d5dbe3;
+  --accent: #0f766e;
+  --accent-fg: #ffffff;
+  --accent-soft: #d9f2ee;
+  --danger: #b91c1c;
+  --danger-soft: #fde8e8;
+  --warn: #92400e;
+  --warn-soft: #fdf0d5;
+  --ok: #166534;
+  --ok-soft: #dcf5e4;
+  --info-soft: #e3ecfb;
+  --info: #1e40af;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0b1220; --surface: #111a2b; --surface-2: #182338; --fg: #e6eaf0; --muted: #a3adbd; --border: #2a3650;
+    --accent: #2dd4bf; --accent-fg: #042f2e; --accent-soft: #0f3b39; --danger: #f87171; --danger-soft: #3b1518;
+    --warn: #fbbf24; --warn-soft: #3a2a0b; --ok: #4ade80; --ok-soft: #0f2f1c; --info: #93b4f5; --info-soft: #14244a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0b1220; --surface: #111a2b; --surface-2: #182338; --fg: #e6eaf0; --muted: #a3adbd; --border: #2a3650;
+  --accent: #2dd4bf; --accent-fg: #042f2e; --accent-soft: #0f3b39; --danger: #f87171; --danger-soft: #3b1518;
+  --warn: #fbbf24; --warn-soft: #3a2a0b; --ok: #4ade80; --ok-soft: #0f2f1c; --info: #93b4f5; --info-soft: #14244a;
+  color-scheme: dark;
+}
+
+@theme {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface2: var(--surface-2);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-line: var(--border);
+  --color-accent: var(--accent);
+  --color-accentfg: var(--accent-fg);
+  --color-accentsoft: var(--accent-soft);
+  --color-danger: var(--danger);
+  --color-dangersoft: var(--danger-soft);
+  --color-warn: var(--warn);
+  --color-warnsoft: var(--warn-soft);
+  --color-ok: var(--ok);
+  --color-oksoft: var(--ok-soft);
+  --color-info: var(--info);
+  --color-infosoft: var(--info-soft);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+html, body, #root { min-height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-tap-highlight-color: transparent;
+}
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
+dialog::backdrop { background: rgb(0 0 0 / 0.5); }
+.safe-top { padding-top: env(safe-area-inset-top); }
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+.safe-x { padding-left: max(1rem, env(safe-area-inset-left)); padding-right: max(1rem, env(safe-area-inset-right)); }
