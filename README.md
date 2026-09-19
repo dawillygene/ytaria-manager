@@ -1,180 +1,63 @@
 # ytaria-manager
 
-Local YouTube-style download manager built on `yt-dlp`, `aria2c`, and SQLite.
+A secure, multi-user download manager with a **web app** and an **Android app**. Users sign in, submit a supported media URL,
+pick a quality, and a server-side worker (yt-dlp + aria2c + ffmpeg) downloads it. The finished file is stored privately on the
+server and then transferred to the user's browser or phone. Use it only for content you are authorised to download.
 
-![ytaria-manager UI](assets/ytaria-manager-ui.png)
+| Web: ready on the server | Android: saved on the device |
+| --- | --- |
+| ![web](docs/screenshots/web-ready-on-server.png) | ![android](docs/screenshots/android-saved-on-device.png) |
 
-## Overview
-
-`ytaria-manager` gives you a simple local interface for queueing video downloads, watching live progress, and controlling jobs without using the terminal for every action.
-
-It includes:
-
-- A local web UI for queueing and managing downloads
-- A shared SQLite job queue
-- A background worker powered by `yt-dlp` and `aria2c`
-- A curses TUI that reads the same jobs as the web app
-- Pause, resume, cancel, and retry controls
+> "Ready on server" and "Saved on device" are different states. Downloading on the server never saves anything on a phone by itself.
 
 ## Stack
+FastAPI + Pydantic · PostgreSQL + SQLAlchemy + Alembic · Celery + Redis · yt-dlp/aria2c/ffmpeg · React 19 + TypeScript + Vite + Tailwind 4 ·
+Capacitor 8 (Android first) · Docker Compose + Nginx on one Linux VPS.
 
-- `python3`
-- `yt-dlp`
-- `aria2c`
-- `ffmpeg`
-- `sqlite3`
-
-## Requirements
-
-Make sure these are installed and available in your shell:
-
-- `python3`
-- `yt-dlp`
-- `aria2c`
-- `ffmpeg`
-
-## Start The Web UI
-
-Run in the foreground:
-
+## Quick start (development)
 ```bash
-cd /home/dawilly/Downloads/ytaria-manager
-python3 ytaria.py serve --host 127.0.0.1 --port 8787
+docker run -d --name ytaria-dev-pg -e POSTGRES_USER=ytaria -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=ytaria -p 127.0.0.1:55432:5432 postgres:17-alpine
+docker run -d --name ytaria-dev-redis -p 127.0.0.1:56379:6379 redis:7-alpine
+python3 -m venv .venv && .venv/bin/pip install -r backend/requirements-dev.txt
+cd backend && ../.venv/bin/alembic upgrade head
+export YTARIA_ALLOW_DIRECT_EGRESS=true                     # dev only; production forces the egress proxy
+../.venv/bin/uvicorn app.main:app &                        # API on :8000
+../.venv/bin/celery -A app.worker.celery_app worker -Q downloads,inspect,maintenance -c 3 &
+../.venv/bin/celery -A app.worker.celery_app beat &
+cd ../frontend && npm ci && npm run dev                    # http://127.0.0.1:5173
 ```
+Or run the whole production-shaped stack locally (HTTP on :8080, real egress boundary):
+`docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env up --build`.
+Full details: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-Start it in the background:
+## Android
+`cd frontend && npm run build:android && (cd android && ./gradlew assembleDebug)` – see [docs/ANDROID.md](docs/ANDROID.md)
+(signing, release build, emulator evidence, limits: the device transfer is foreground-only).
 
-```bash
-cd /home/dawilly/Downloads/ytaria-manager
-python3 ytaria.py start --host 127.0.0.1 --port 8787
+## Deploy
+`.env` → `docker compose up -d` → `./deploy/certbot.sh init DOMAIN EMAIL`. Only Nginx publishes ports. See
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) (HTTPS, backup/restore, upgrade/rollback, sizing, scaling) and read
+[docs/SECURITY.md](docs/SECURITY.md) before exposing it publicly.
+
+## Documentation
+[Architecture & job state machine](docs/ARCHITECTURE.md) · [Security](docs/SECURITY.md) · [Deployment](docs/DEPLOYMENT.md) ·
+[Android](docs/ANDROID.md) · [Development & tests](docs/DEVELOPMENT.md) · [Legacy mode & import](docs/LEGACY.md) ·
+[Baseline review](docs/BASELINE.md) · [Progress / hand-off](docs/PROGRESS.md)
+
+## Legacy local tool
+The original single-user script (`ytaria.py`, TUI, `start-web.sh`, …) still works on its own SQLite database, with the unsafe
+features removed (browser cookies, infinite retries, client-chosen output directory, option injection). It is not connected to the new queue.
+`python3 ytaria.py serve --host 127.0.0.1 --port 8787` · `python3 ytaria.py tui` · `python3 ytaria.py add <url>`.
+See [docs/LEGACY.md](docs/LEGACY.md) for the differences and the optional, explicit `import-legacy` command.
+
+## Layout
 ```
-
-Open:
-
-- `http://127.0.0.1:8787/`
-
-Check status, stop, or restart:
-
-```bash
-cd /home/dawilly/Downloads/ytaria-manager
-python3 ytaria.py status --host 127.0.0.1 --port 8787
-python3 ytaria.py stop --host 127.0.0.1 --port 8787
-python3 ytaria.py restart --host 127.0.0.1 --port 8787
+backend/    FastAPI app, Celery worker, egress proxy, migrations, tests      frontend/  React app + Capacitor Android project
+deploy/     Nginx, certbot, backup/restore, egress probe                     docs/      documentation
+docker-compose.yml  docker-compose.dev.yml  .env.example  .github/workflows/ci.yml  ytaria.py (legacy)
 ```
-
-Shell helpers:
-
-```bash
-./start-web.sh
-./status-web.sh
-./stop-web.sh
-./restart-web.sh
-```
-
-The background service keeps its PID in `~/.local/state/ytaria-manager/web.pid`.
-
-## Start The TUI
-
-```bash
-cd /home/dawilly/Downloads/ytaria-manager
-python3 ytaria.py tui
-```
-
-Keys:
-
-- `a` add a URL
-- `r` refresh
-- `q` quit
-
-## Queue Jobs From CLI
-
-```bash
-python3 ytaria.py add "https://youtu.be/tYp-UskX0cM"
-python3 ytaria.py list
-```
-
-## Bypassing YouTube's Bot Check
-
-YouTube increasingly blocks anonymous downloads with:
-
-```
-ERROR: [youtube] ...: Sign in to confirm you're not a bot.
-```
-
-To get past it, `yt-dlp` needs cookies from a logged-in browser session. You have two ways to supply them.
-
-### Per-job, from the web UI
-
-Next to the URL field there's a **Cookies from browser** menu. Pick your logged-in
-browser (Firefox, Chrome, Chromium, Brave, Edge, Opera, Vivaldi, or Safari) before
-adding the job. The choice is saved with the job.
-
-Every failed or canceled job card also has its own browser menu next to **Retry**, so
-you can add cookies to a job that was queued before you set a browser (or switch to a
-different one) and retry it without re-pasting the URL.
-
-From the CLI, use the matching flag:
-
-```bash
-python3 ytaria.py add "https://youtu.be/..." --cookies-from-browser firefox
-```
-
-### Globally, with environment variables
-
-Set one of these before launching `serve`, `worker`, or `tui`. They act as the default
-for any job that doesn't specify its own browser:
-
-```bash
-export YTARIA_COOKIES_FROM_BROWSER=firefox     # read cookies straight from a browser
-export YTARIA_COOKIES_FILE=/path/to/cookies.txt # or an exported cookies.txt
-```
-
-**Notes**
-
-- Fully close Chromium-based browsers (Chrome, Brave, Edge, …) while downloading, or
-  `yt-dlp` will hit a locked cookie database. Firefox doesn't have this problem.
-- `YTARIA_COOKIES_FROM_BROWSER` takes precedence over `YTARIA_COOKIES_FILE`; a per-job
-  browser choice overrides both.
-- Use an account you don't mind exercising through a downloader.
-
-## Download Behavior
-
-The worker runs downloads with:
-
-```bash
-yt-dlp -f "bv*+ba/b" \
-  --downloader aria2c \
-  --merge-output-format mp4
-```
-
-The `/b` fallback matters: it takes the best separate video+audio streams when they
-exist, but falls back to the best single combined file otherwise. Without it, videos
-that only offer progressive formats fail with `Requested format is not available`.
-
-## Job Controls
-
-- `Pause` stops the active download and keeps resume data
-- `Continue` requeues a paused job and resumes it
-- `Cancel` stops a queued or running job
-- `Retry` restarts a failed or canceled job
-- Live progress, speed, ETA, and output path are shown in the UI
-
-## Storage
-
-- SQLite database: `~/.local/share/ytaria-manager/jobs.sqlite3`
-- Default output directory: `~/Downloads/ytaria-downloads`
-
-## Project Files
-
-- [ytaria.py](ytaria.py) main application with web UI, worker, API, and TUI
-- [start-web.sh](start-web.sh) helper to start the web app in background mode
-- [stop-web.sh](stop-web.sh) helper to stop the background web app
-- [restart-web.sh](restart-web.sh) helper to restart the background web app
-- [status-web.sh](status-web.sh) helper to inspect the background web app
-- [start-tui.sh](start-tui.sh) helper to launch the terminal UI
 
 ## Credit
-
 Developed and maintained by **Elia William Mariki (dawillygene)**, a systems software engineer based in Dodoma, Tanzania.
 
 Website: [dawillygene.com](https://www.dawillygene.com/)
